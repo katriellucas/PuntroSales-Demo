@@ -1,0 +1,112 @@
+name: Build DemoPOS installable APKs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Prepare Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0'
+
+      - name: Install Gradle (no wrapper needed)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.2.1'
+
+      - name: Fix upstream source for CI only
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # CI-only patches for the specific source snapshot. No changes are committed.
+          def patch_file(path, pairs):
+              f = Path(path)
+              s = f.read_text()
+              for old, new in pairs:
+                  if old not in s:
+                      raise SystemExit(f"Expected source fragment not found in {path}: {old[:65]!r}. Review upstream changes.")
+                  s = s.replace(old, new, 1)
+              f.write_text(s)
+
+          patch_file('app/build.gradle.kts', [
+              (r'\$roomVersion', '$roomVersion'),
+              (r'\$roomVersion', '$roomVersion'),
+              (r'\$roomVersion', '$roomVersion'),
+              (r'\$roomVersion', '$roomVersion'),
+              (r'\$hiltVersion', '$hiltVersion'),
+              (r'\$hiltVersion', '$hiltVersion'),
+              ('applicationId = "com.demopos"', 'applicationId = "com.demopos.opensource"'),
+              ('release {\n            isMinifyEnabled = true', 'release {\n            // TEST ONLY: sign this release variant with the temporary debug key.\n            signingConfig = signingConfigs.getByName("debug")\n            isMinifyEnabled = false'),
+              ('buildFeatures {\n        compose = true', 'buildFeatures {\n        buildConfig = true\n        compose = true'),
+          ])
+          patch_file('app/src/main/java/com/demopos/di/NetworkModule.kt', [
+              ('import com.demopos.data.remote.ApiClient', 'import com.demopos.data.remote.ApiClient\nimport com.demopos.data.remote.ApiService'),
+              ('fun provideApiClient(): ApiClient', 'fun provideApiService(): ApiService'),
+          ])
+          patch_file('app/src/main/java/com/demopos/data/repositories/AuthRepositoryImpl.kt', [
+              ('import javax.inject.Inject', 'import javax.inject.Inject\nimport dagger.hilt.android.qualifiers.ApplicationContext'),
+              ('private val context: Context,', '@ApplicationContext private val context: Context,'),
+              ('expiresAt = Date(System.currentTimeMillis() + 86400000),\n                updatedAt = Date()', 'expiresAt = Date(System.currentTimeMillis() + 86400000)'),
+          ])
+          patch_file('app/src/main/java/com/demopos/presentation/ui/screens/DashboardScreen.kt', [
+              ('import androidx.compose.foundation.layout.Box', 'import androidx.compose.foundation.layout.Box\nimport androidx.compose.foundation.layout.Row'),
+              ('// Header\n            Box(', '// Header\n            Row('),
+              ('contentAlignment = Alignment.CenterStart', 'verticalAlignment = Alignment.CenterVertically'),
+          ])
+          patch_file('app/src/main/java/com/demopos/presentation/ui/screens/PinLoginScreen.kt', [
+              ('import androidx.compose.foundation.layout.size', 'import androidx.compose.foundation.layout.size\nimport androidx.compose.foundation.layout.heightIn'),
+              ('modifier = modifier\n            .padding(4.dp)\n            .then(\n                Modifier then androidx.compose.foundation.layout.heightIn(min = 60.dp)\n            ),', 'modifier = modifier\n            .padding(4.dp)\n            .heightIn(min = 60.dp),'),
+          ])
+          manifest_path = Path('app/src/main/AndroidManifest.xml')
+          manifest = manifest_path.read_text()
+          for line in manifest.splitlines(keepends=True):
+              if 'android:dataExtractionRules=' in line or 'android:fullBackupContent=' in line or 'android:icon=' in line or 'android:roundIcon=' in line:
+                  manifest = manifest.replace(line, '')
+          manifest = manifest.replace('@string/app_name', 'DemoPOS').replace('@style/Theme.DemoPOS', '@android:style/Theme.Material.Light.NoActionBar')
+          manifest_path.write_text(manifest)
+
+          patch_file('app/src/main/java/com/demopos/presentation/ui/screens/SplashScreen.kt', [
+              ('import androidx.compose.runtime.Composable', 'import androidx.compose.runtime.Composable\nimport androidx.compose.runtime.LaunchedEffect\nimport kotlinx.coroutines.delay'),
+              ('fun SplashScreen(navController: NavController) {', 'fun SplashScreen(navController: NavController) {\n    LaunchedEffect(Unit) {\n        delay(400)\n        navController.navigate("login") {\n            popUpTo("splash") { inclusive = true }\n        }\n    }'),
+          ])
+          print('Source-level CI fixes applied. Proceeding to Gradle build.')
+          PY
+
+      - name: Build installable debug and test-release APKs
+        run: gradle --no-daemon :app:assembleDebug :app:assembleRelease
+
+      - name: Verify APK signatures and label test builds
+        run: |
+          for apk in app/build/outputs/apk/debug/*.apk app/build/outputs/apk/release/*.apk; do
+            "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose "$apk"
+          done
+          mv app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/DemoPOS-debug.apk
+          mv app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/DemoPOS-test-release.apk
+
+      - name: Upload APKs for download
+        uses: actions/upload-artifact@v4
+        with:
+          name: DemoPOS-installable-APKs
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 30
