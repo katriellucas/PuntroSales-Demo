@@ -47,9 +47,17 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Build Huawei debug and signed release APKs
+        shell: bash
         run: |
+          set -euo pipefail
           chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace :app:assembleHuaweiDebug :app:assembleHuaweiRelease
+          ./gradlew \
+            --no-daemon \
+            --refresh-dependencies \
+            --stacktrace \
+            --info \
+            :app:assembleHuaweiDebug \
+            :app:assembleHuaweiRelease
 
       - name: Check generated APKs and signatures
         shell: bash
